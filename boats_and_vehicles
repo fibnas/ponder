@@ -21,7 +21,7 @@
       "title": "Seahunter",
       "note": "",
       "position": {
-        "x": 3.0,
+        "x": 0.0,
         "y": -1.5
       },
       "parent": 1,
@@ -36,7 +36,9 @@
         "y": 0.0
       },
       "parent": 1,
-      "children": []
+      "children": [
+        5
+      ]
     },
     {
       "id": 4,
@@ -48,8 +50,19 @@
       },
       "parent": 1,
       "children": []
+    },
+    {
+      "id": 5,
+      "title": "Goal",
+      "note": "",
+      "position": {
+        "x": 6.0,
+        "y": -1.5
+      },
+      "parent": 3,
+      "children": []
     }
   ],
   "root": 1,
-  "next_id": 5
+  "next_id": 6
 }

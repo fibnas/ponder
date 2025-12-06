@@ -3,7 +3,7 @@ use std::{
     fs,
     io::stdout,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -55,15 +55,38 @@ struct App {
     message: Option<String>,
     dirty: bool,
     show_help: bool,
+    undo_stack: Vec<AppState>,
+    redo_stack: Vec<AppState>,
+    last_autosave: Instant,
+    autosave_interval: Duration,
+    moving_snapshot: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AppState {
+    map: MindMap,
+    selected: NodeId,
 }
 
 #[derive(Debug, Clone)]
 enum Mode {
     Normal,
     Moving,
-    Renaming { buffer: String },
-    Prompt { kind: PromptKind, buffer: String },
-    NoteEditor { buffer: String },
+    Renaming {
+        buffer: String,
+    },
+    Prompt {
+        kind: PromptKind,
+        buffer: String,
+    },
+    NoteEditor {
+        buffer: String,
+    },
+    Search {
+        query: String,
+        results: Vec<NodeId>,
+        index: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -132,6 +155,7 @@ fn run_app(
                 _ => {}
             }
         }
+        app.maybe_autosave();
     }
 }
 
@@ -143,6 +167,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         Mode::Renaming { .. } => handle_renaming_mode(app, key),
         Mode::Prompt { .. } => handle_prompt_mode(app, key),
         Mode::NoteEditor { .. } => handle_note_mode(app, key),
+        Mode::Search { .. } => handle_search_mode(app, key),
     }
 }
 
@@ -151,6 +176,14 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('?') => {
             app.show_help = !app.show_help;
+        }
+        KeyCode::Char('/') => {
+            app.mode = Mode::Search {
+                query: String::new(),
+                results: Vec::new(),
+                index: 0,
+            };
+            app.update_search_results();
         }
         KeyCode::Char('s') => {
             if let Some(path) = app.file_path.clone() {
@@ -178,6 +211,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
             app.reset_to_new();
         }
         KeyCode::Char('a') => {
+            app.push_undo();
             if let Some(new_id) = app.map.add_child(
                 app.selected,
                 "New node".to_string(),
@@ -188,6 +222,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
         }
         KeyCode::Char('d') => {
+            app.push_undo();
             if let Some(next) = app.map.delete_subtree(app.selected) {
                 app.selected = next;
                 app.dirty = true;
@@ -196,6 +231,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
         }
         KeyCode::Char('c') => {
+            app.push_undo();
             if let Some(new_id) = app.map.clone_subtree(app.selected) {
                 app.selected = new_id;
                 app.dirty = true;
@@ -203,6 +239,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
         }
         KeyCode::Char('m') => {
             app.mode = Mode::Moving;
+            app.moving_snapshot = false;
         }
         KeyCode::Char('t') => {
             if let Some(node) = app.map.node(app.selected) {
@@ -232,6 +269,22 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
                 app.selected = prev;
             }
         }
+        KeyCode::Char('u') | KeyCode::Char('z')
+            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            app.undo();
+        }
+        KeyCode::Char('u') => {
+            app.undo();
+        }
+        KeyCode::Char('r') | KeyCode::Char('y')
+            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            app.redo();
+        }
+        KeyCode::Char('r') => {
+            app.redo();
+        }
         _ => {}
     }
     Ok(false)
@@ -247,20 +300,37 @@ fn handle_moving_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
     match key.code {
         KeyCode::Esc | KeyCode::Char('m') => {
             app.mode = Mode::Normal;
+            app.moving_snapshot = false;
         }
         KeyCode::Left => {
+            if !app.moving_snapshot {
+                app.push_undo();
+                app.moving_snapshot = true;
+            }
             app.map.move_node(app.selected, -step, 0.0);
             app.dirty = true;
         }
         KeyCode::Right => {
+            if !app.moving_snapshot {
+                app.push_undo();
+                app.moving_snapshot = true;
+            }
             app.map.move_node(app.selected, step, 0.0);
             app.dirty = true;
         }
         KeyCode::Up => {
+            if !app.moving_snapshot {
+                app.push_undo();
+                app.moving_snapshot = true;
+            }
             app.map.move_node(app.selected, 0.0, step);
             app.dirty = true;
         }
         KeyCode::Down => {
+            if !app.moving_snapshot {
+                app.push_undo();
+                app.moving_snapshot = true;
+            }
             app.map.move_node(app.selected, 0.0, -step);
             app.dirty = true;
         }
@@ -271,18 +341,16 @@ fn handle_moving_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
 }
 
 fn handle_renaming_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
+    let mut commit: Option<String> = None;
+    let mut exit_mode = false;
     if let Mode::Renaming { buffer } = &mut app.mode {
         match key.code {
             KeyCode::Esc => {
-                app.mode = Mode::Normal;
+                exit_mode = true;
             }
             KeyCode::Enter => {
-                let new_title = buffer.trim().to_string();
-                if let Some(node) = app.map.node_mut(app.selected) {
-                    node.title = new_title;
-                    app.dirty = true;
-                }
-                app.mode = Mode::Normal;
+                commit = Some(buffer.trim().to_string());
+                exit_mode = true;
             }
             KeyCode::Backspace => {
                 buffer.pop();
@@ -292,6 +360,16 @@ fn handle_renaming_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             _ => {}
         }
+    }
+    if let Some(new_title) = commit {
+        app.push_undo();
+        if let Some(node) = app.map.node_mut(app.selected) {
+            node.title = new_title;
+            app.dirty = true;
+        }
+    }
+    if exit_mode {
+        app.mode = Mode::Normal;
     }
     Ok(false)
 }
@@ -312,6 +390,8 @@ fn handle_prompt_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
                             app.file_path = Some(path);
                             app.message = Some("Opened map".to_string());
                             app.dirty = false;
+                            app.undo_stack.clear();
+                            app.redo_stack.clear();
                         }
                         Err(err) => {
                             app.message = Some(format!("Failed to open: {err}"));
@@ -340,14 +420,13 @@ fn handle_prompt_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
 }
 
 fn handle_note_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
+    let mut commit_note: Option<String> = None;
+    let mut exit_mode = false;
     if let Mode::NoteEditor { buffer } = &mut app.mode {
         match key.code {
             KeyCode::Esc => {
-                if let Some(node) = app.map.node_mut(app.selected) {
-                    node.note = buffer.clone();
-                    app.dirty = true;
-                }
-                app.mode = Mode::Normal;
+                commit_note = Some(buffer.clone());
+                exit_mode = true;
             }
             KeyCode::Backspace => {
                 buffer.pop();
@@ -363,7 +442,63 @@ fn handle_note_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
             _ => {}
         }
     }
+    if let Some(note) = commit_note {
+        app.push_undo();
+        if let Some(node) = app.map.node_mut(app.selected) {
+            node.note = note;
+            app.dirty = true;
+        }
+    }
+    if exit_mode {
+        app.mode = Mode::Normal;
+    }
+    Ok(false)
+}
 
+fn handle_search_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
+    if let Mode::Search {
+        query,
+        results,
+        index,
+    } = &mut app.mode
+    {
+        match key.code {
+            KeyCode::Esc => {
+                app.mode = Mode::Normal;
+            }
+            KeyCode::Enter => {
+                if let Some(id) = results.get(*index) {
+                    app.selected = *id;
+                }
+                app.mode = Mode::Normal;
+            }
+            KeyCode::Up => {
+                if !results.is_empty() {
+                    if *index == 0 {
+                        *index = results.len() - 1;
+                    } else {
+                        *index -= 1;
+                    }
+                }
+            }
+            KeyCode::Down => {
+                if !results.is_empty() {
+                    *index = (*index + 1) % results.len();
+                }
+            }
+            KeyCode::Backspace => {
+                query.pop();
+                app.update_search_results();
+            }
+            KeyCode::Char(c) => {
+                if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                    query.push(c);
+                    app.update_search_results();
+                }
+            }
+            _ => {}
+        }
+    }
     Ok(false)
 }
 
@@ -372,6 +507,7 @@ fn save_current_map(app: &mut App, path: PathBuf) -> Result<()> {
     app.file_path = Some(path);
     app.dirty = false;
     app.message = Some("Map saved".to_string());
+    app.last_autosave = Instant::now();
     Ok(())
 }
 
@@ -407,6 +543,13 @@ fn draw(f: &mut Frame, app: &App) {
             render_input_overlay(f, label, buffer);
         }
         Mode::NoteEditor { buffer } => render_note_overlay(f, buffer),
+        Mode::Search {
+            query,
+            results,
+            index,
+        } => {
+            render_search_overlay(f, query, *index, results.len());
+        }
         Mode::Moving | Mode::Normal => {}
     }
 
@@ -427,6 +570,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
         Mode::Renaming { .. } => "rename",
         Mode::Prompt { .. } => "prompt",
         Mode::NoteEditor { .. } => "notes",
+        Mode::Search { .. } => "search",
     };
 
     let title_line = format!(
@@ -454,6 +598,16 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_map(f: &mut Frame, area: Rect, app: &App) {
     let (min_x, max_x, min_y, max_y) = app.map.bounds();
+    let mut search_hits = HashSet::new();
+    let mut focused_hit: Option<NodeId> = None;
+    if let Mode::Search { results, index, .. } = &app.mode {
+        for id in results {
+            search_hits.insert(*id);
+        }
+        if !results.is_empty() && *index < results.len() {
+            focused_hit = Some(results[*index]);
+        }
+    }
     let canvas = Canvas::default()
         .block(
             Block::default()
@@ -479,8 +633,12 @@ fn render_map(f: &mut Frame, area: Rect, app: &App) {
 
             for node in &app.map.nodes {
                 let is_selected = node.id == app.selected;
-                let color = if is_selected {
+                let color = if Some(node.id) == focused_hit {
+                    Color::Yellow
+                } else if is_selected {
                     Color::Cyan
+                } else if search_hits.contains(&node.id) {
+                    Color::LightYellow
                 } else {
                     Color::White
                 };
@@ -523,7 +681,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         .message
         .clone()
         .unwrap_or_else(|| {
-            "q quit - o open - s save - S save as - n new - a add child - c clone - d delete - m move - t rename - Enter notes - ? help"
+            "q quit - o open - s save - S save as - n new - a add - c clone - d delete - m move - t rename - Enter notes - / search - u undo - r redo - ? help"
                 .to_string()
         });
     let gauge = LineGauge::default()
@@ -541,6 +699,22 @@ fn render_input_overlay(f: &mut Frame, label: &str, buffer: &str) {
         .title(Title::from(label).alignment(Alignment::Center))
         .borders(Borders::ALL);
     let paragraph = Paragraph::new(buffer.to_string() + "_").block(block);
+    f.render_widget(Clear, area);
+    f.render_widget(paragraph, area);
+}
+
+fn render_search_overlay(f: &mut Frame, query: &str, index: usize, count: usize) {
+    let area = centered_rect(60, 20, f.size());
+    let title = format!(
+        "Search ({}/{})",
+        if count == 0 { 0 } else { index + 1 },
+        count
+    );
+    let block = Block::default()
+        .title(Title::from(title).alignment(Alignment::Center))
+        .borders(Borders::ALL);
+    let hint = "\nUp/Down to cycle, Enter to jump, Esc to close";
+    let paragraph = Paragraph::new(query.to_string() + "_" + hint).block(block);
     f.render_widget(Clear, area);
     f.render_widget(paragraph, area);
 }
@@ -565,7 +739,9 @@ fn render_help(f: &mut Frame) {
         "Add child: a | Clone: c | Delete: d",
         "Move node: m then arrows (hold Shift for bigger steps)",
         "Rename: t | Notes: Enter (multi-line, Esc to close)",
-        "Open: o | Save: s | Save As: S | New map: n",
+        "Search: / (type, Enter to jump, Up/Down cycle)",
+        "Undo: u or Ctrl+Z | Redo: r or Ctrl+Y",
+        "Open: o | Save: s | Save As: S | New map: n (autosaves every 10s when dirty)",
         "Toggle help: ? | Quit: q",
     ];
     let block = Block::default()
@@ -615,6 +791,11 @@ impl App {
             message: None,
             dirty: false,
             show_help: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            last_autosave: Instant::now(),
+            autosave_interval: Duration::from_secs(10),
+            moving_snapshot: false,
         }
     }
 
@@ -624,11 +805,102 @@ impl App {
         self.file_path = None;
         self.dirty = false;
         self.message = Some("Started a new map".to_string());
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.moving_snapshot = false;
     }
 
     fn map_select_direction(&mut self, dir: NavDir) {
         if let Some(next) = self.map.nearest_in_direction(self.selected, dir) {
             self.selected = next;
+        }
+    }
+
+    fn push_undo(&mut self) {
+        self.push_current_to_undo();
+        self.redo_stack.clear();
+    }
+
+    fn push_current_to_undo(&mut self) {
+        const HISTORY_LIMIT: usize = 64;
+        self.undo_stack.push(AppState {
+            map: self.map.clone(),
+            selected: self.selected,
+        });
+        if self.undo_stack.len() > HISTORY_LIMIT {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    fn undo(&mut self) {
+        if let Some(state) = self.undo_stack.pop() {
+            let redo_state = AppState {
+                map: self.map.clone(),
+                selected: self.selected,
+            };
+            self.redo_stack.push(redo_state);
+            self.map = state.map;
+            self.selected = state.selected;
+            self.dirty = true;
+            self.message = Some("Undo".to_string());
+        } else {
+            self.message = Some("Nothing to undo".to_string());
+        }
+    }
+
+    fn redo(&mut self) {
+        if let Some(state) = self.redo_stack.pop() {
+            self.push_current_to_undo();
+            self.map = state.map;
+            self.selected = state.selected;
+            self.dirty = true;
+            self.message = Some("Redo".to_string());
+        } else {
+            self.message = Some("Nothing to redo".to_string());
+        }
+    }
+
+    fn maybe_autosave(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        if self.last_autosave.elapsed() < self.autosave_interval {
+            return;
+        }
+        let path = self
+            .file_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("ponder_autosave.json"));
+        if save_map(&path, &self.map).is_ok() {
+            self.last_autosave = Instant::now();
+            self.message = Some(format!("Autosaved {}", path.to_string_lossy()));
+        }
+    }
+
+    fn update_search_results(&mut self) {
+        if let Mode::Search {
+            query,
+            results,
+            index,
+        } = &mut self.mode
+        {
+            let q = query.to_lowercase();
+            results.clear();
+            if q.is_empty() {
+                return;
+            }
+            for node in &self.map.nodes {
+                let title = node.title.to_lowercase();
+                let note = node.note.to_lowercase();
+                if title.contains(&q) || note.contains(&q) {
+                    results.push(node.id);
+                }
+            }
+            if results.is_empty() {
+                *index = 0;
+            } else if *index >= results.len() {
+                *index = 0;
+            }
         }
     }
 }
