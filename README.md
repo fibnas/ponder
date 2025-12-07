@@ -2,9 +2,9 @@
 
 Rust TUI mind-map (Excalidraw-in-terminal vibes) with movable nodes, notes, colors, undo/redo, autosave, search, and JSON persistence — all in your terminal.
 
-[![Crates.io](https://img.shields.io/crates/v/ponder.svg)](https://crates.io/crates/ponder)
-[![Docs](https://docs.rs/ponder/badge.svg)](https://docs.rs/ponder)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/fibnas/ponder/blob/main/LICENSE)
+[![Crates.io](https://img.shields.io/crates/v/ponder.svg?cb=1)](https://crates.io/crates/ponder)
+[![Docs](https://docs.rs/ponder/badge.svg?cb=1)](https://docs.rs/ponder)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg?cb=1)](https://github.com/fibnas/ponder/blob/main/LICENSE)
 
 ![Mind map screenshot](https://raw.githubusercontent.com/fibnas/ponder/main/assets/mindmap.png)
 
