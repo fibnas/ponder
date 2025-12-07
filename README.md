@@ -6,7 +6,7 @@ Rust TUI mind-map (Excalidraw-in-terminal vibes) with movable nodes, notes, colo
 [![Docs](https://docs.rs/ponder/badge.svg)](https://docs.rs/ponder)
 [![License](https://img.shields.io/crates/l/ponder.svg)](#license)
 
-![Mind map screenshot](assets/mindmap.png)
+![Mind map screenshot](https://raw.githubusercontent.com/fibnas/ponder/main/assets/mindmap.png)
 
 > Sketch project trees, CLI ideas, and scratch notes without leaving the keyboard.
 > Maps are just JSON, so they version cleanly in git.
@@ -173,4 +173,3 @@ This format is stable, readable, and git-friendly.
 ## License
 
 MIT — see `LICENSE`.
-
