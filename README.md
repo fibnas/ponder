@@ -30,7 +30,7 @@ cargo install ponder --force
 Or build locally:
 
 ```bash
-git clone https://github.com/YOURHANDLE/ponder
+git clone https://github.com/fibnas/ponder
 cd ponder
 cargo run --release
 ```
