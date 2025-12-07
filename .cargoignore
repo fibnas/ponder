@@ -2,6 +2,7 @@
 target/
 debug/
 release/
+Cargo.lock
 
 # === Git metadata ===
 .git/

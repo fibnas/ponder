@@ -5,7 +5,7 @@ release/
 
 # === Cargo-related ===
 **/*.rs.bk
-Cargo.lock        # ignore for libraries; include if you prefer reproducible builds
+
 
 # === IDEs & Editors ===
 .vscode/
