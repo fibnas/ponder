@@ -4,7 +4,7 @@ Rust TUI mind-map (Excalidraw-in-terminal vibes) with movable nodes, notes, colo
 
 [![Crates.io](https://img.shields.io/crates/v/ponder.svg)](https://crates.io/crates/ponder)
 [![Docs](https://docs.rs/ponder/badge.svg)](https://docs.rs/ponder)
-[![License](https://img.shields.io/crates/l/ponder.svg)](#license)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/fibnas/ponder/blob/main/LICENSE)
 
 ![Mind map screenshot](https://raw.githubusercontent.com/fibnas/ponder/main/assets/mindmap.png)
 
