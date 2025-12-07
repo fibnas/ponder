@@ -1,37 +1,34 @@
-# Do NOT ship build output
+# === Build output (never publish) ===
 target/
 debug/
 release/
 
-# Do NOT ship your local assets/screenshots
-assets/
-# If you want to include 1 specific file:
-# !assets/mindmap.png
-
-# Git metadata
+# === Git metadata ===
 .git/
 .gitignore
 .gitattributes
 
-# Editor/IDE
+# === Editor/IDE ===
 .vscode/
 .idea/
 
-# Temporary files
+# === Temporary files ===
 *.log
 *.tmp
 *.swp
 *.swo
 *~
 
-# Python junk
-__pycache__/
-*.pyc
-
-# Project metadata not needed for crates.io
+# === Local-only metadata ===
 *.md.bak
 *.old
 *.backup
-
-# Local config files
 *.env
+
+# === Python junk ===
+__pycache__/
+*.pyc
+
+# === Keep assets folder ===
+# DO NOT ignore assets — needed for README image
+# (No rule added; assets included)

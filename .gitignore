@@ -5,14 +5,11 @@ release/
 
 # === Cargo-related ===
 **/*.rs.bk
-Cargo.lock        # if this is a *library crate*; keep for binaries if you want reproducibility
+Cargo.lock        # ignore for libraries; include if you prefer reproducible builds
 
 # === IDEs & Editors ===
-# VS Code
 .vscode/
 *.code-workspace
-
-# JetBrains
 .idea/
 
 # === OS / Temp files ===
@@ -26,31 +23,24 @@ Thumbs.db
 logs/
 *.log
 
-# === TUI screenshots, recordings, assets ===
-/assets/*.png
-/assets/*.jpg
-/assets/*.jpeg
-/assets/*.gif
-/assets/*.mp4
-/assets/*.webm
+# === Assets ===
+# DO NOT ignore `/assets` — required for README images
+# (No patterns here)
 
-# You can selectively unignore the key image:
-# !assets/mindmap.png
-
-# === Autosave files from app ===
+# === Autosave files from the app ===
 ponder_autosave.json
 *.autosave.json
 
-# === Local scratch JSON mindmaps ===
+# === Local scratch maps ===
 *.json.backup
 *.json.tmp
 **/tmp_maps/
 
-# === Python scripts (if supporting automation) ===
+# === Python junk ===
 __pycache__/
 *.pyc
 
-# === Binary builds / release artifacts ===
+# === Binary outputs ===
 *.exe
 *.dll
 *.so
