@@ -2,6 +2,13 @@
 name = "ponder"
 version = "0.1.0"
 edition = "2024"
+authors = ["Frank Stallion <frank.stallion@ojefe.com>"]
+description = "Rust TUI mind-map for the terminal with movable nodes, notes, colors, undo/redo, autosave, and search."
+readme = "README.md"
+repository = "https://github.com/fibnas/ponder"
+license = "MIT"
+keywords = ["tui", "mind-map", "terminal", "notes", "ratatui"]
+categories = ["command-line-utilities", "visualization"]
 
 [dependencies]
 anyhow = "1"
@@ -9,3 +16,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 crossterm = "0.27"
 ratatui = { version = "0.26", default-features = false, features = ["crossterm"] }
+
+[[bin]]
+name = "ponder"
+path = "src/main.rs"

@@ -1,1 +1,61 @@
-/target
+# === Rust build output ===
+target/
+debug/
+release/
+
+# === Cargo-related ===
+**/*.rs.bk
+Cargo.lock        # if this is a *library crate*; keep for binaries if you want reproducibility
+
+# === IDEs & Editors ===
+# VS Code
+.vscode/
+*.code-workspace
+
+# JetBrains
+.idea/
+
+# === OS / Temp files ===
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# === Logs & dumps ===
+logs/
+*.log
+
+# === TUI screenshots, recordings, assets ===
+/assets/*.png
+/assets/*.jpg
+/assets/*.jpeg
+/assets/*.gif
+/assets/*.mp4
+/assets/*.webm
+
+# You can selectively unignore the key image:
+# !assets/mindmap.png
+
+# === Autosave files from app ===
+ponder_autosave.json
+*.autosave.json
+
+# === Local scratch JSON mindmaps ===
+*.json.backup
+*.json.tmp
+**/tmp_maps/
+
+# === Python scripts (if supporting automation) ===
+__pycache__/
+*.pyc
+
+# === Binary builds / release artifacts ===
+*.exe
+*.dll
+*.so
+*.dylib
+
+# === Dist directories ===
+dist/
+build/

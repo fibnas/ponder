@@ -16,7 +16,7 @@ use ratatui::{
     backend::CrosstermBackend,
     prelude::*,
     widgets::canvas::{Canvas, Line},
-    widgets::{Block, Borders, Clear, LineGauge, Paragraph, Wrap, block::Title},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap, block::Title},
 };
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +35,8 @@ struct Node {
     id: NodeId,
     title: String,
     note: String,
+    #[serde(default)]
+    color: NodeColor,
     position: Position,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
@@ -51,13 +53,14 @@ struct App {
     map: MindMap,
     selected: NodeId,
     file_path: Option<PathBuf>,
+    autosave_path: PathBuf,
     mode: Mode,
-    message: Option<String>,
+    message: Option<Toast>,
     dirty: bool,
     show_help: bool,
     undo_stack: Vec<AppState>,
     redo_stack: Vec<AppState>,
-    last_autosave: Instant,
+    last_autosave: Option<Instant>,
     autosave_interval: Duration,
     moving_snapshot: bool,
 }
@@ -93,6 +96,8 @@ enum Mode {
 enum PromptKind {
     Open,
     SaveAs,
+    AutosavePath,
+    AutosaveInterval,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -101,6 +106,67 @@ enum NavDir {
     Right,
     Up,
     Down,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+enum NodeColor {
+    Default,
+    Red,
+    Green,
+    Blue,
+    Yellow,
+    Magenta,
+    Cyan,
+}
+
+impl NodeColor {
+    fn to_color(self) -> Color {
+        match self {
+            NodeColor::Default => Color::White,
+            NodeColor::Red => Color::Red,
+            NodeColor::Green => Color::Green,
+            NodeColor::Blue => Color::Blue,
+            NodeColor::Yellow => Color::Yellow,
+            NodeColor::Magenta => Color::Magenta,
+            NodeColor::Cyan => Color::Cyan,
+        }
+    }
+
+    fn cycle_next(self) -> Self {
+        match self {
+            NodeColor::Default => NodeColor::Red,
+            NodeColor::Red => NodeColor::Green,
+            NodeColor::Green => NodeColor::Blue,
+            NodeColor::Blue => NodeColor::Yellow,
+            NodeColor::Yellow => NodeColor::Magenta,
+            NodeColor::Magenta => NodeColor::Cyan,
+            NodeColor::Cyan => NodeColor::Default,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            NodeColor::Default => "default",
+            NodeColor::Red => "red",
+            NodeColor::Green => "green",
+            NodeColor::Blue => "blue",
+            NodeColor::Yellow => "yellow",
+            NodeColor::Magenta => "magenta",
+            NodeColor::Cyan => "cyan",
+        }
+    }
+}
+
+impl Default for NodeColor {
+    fn default() -> Self {
+        NodeColor::Default
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Toast {
+    text: String,
+    expires_at: Option<Instant>,
 }
 
 fn main() -> Result<()> {
@@ -142,6 +208,7 @@ fn run_app(
 ) -> Result<()> {
     let tick_rate = Duration::from_millis(50);
     loop {
+        app.prune_message();
         terminal.draw(|f| draw(f, app))?;
 
         if event::poll(tick_rate)? {
@@ -185,6 +252,18 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
             };
             app.update_search_results();
         }
+        KeyCode::Char('A') => {
+            app.mode = Mode::Prompt {
+                kind: PromptKind::AutosavePath,
+                buffer: app.autosave_path.to_string_lossy().to_string(),
+            };
+        }
+        KeyCode::Char('I') => {
+            app.mode = Mode::Prompt {
+                kind: PromptKind::AutosaveInterval,
+                buffer: app.autosave_interval.as_secs().to_string(),
+            };
+        }
         KeyCode::Char('s') => {
             if let Some(path) = app.file_path.clone() {
                 save_current_map(app, path)?;
@@ -221,13 +300,19 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
                 app.dirty = true;
             }
         }
+        KeyCode::Char('[') => {
+            app.jump_to_parent();
+        }
+        KeyCode::Char(']') => {
+            app.jump_to_first_child();
+        }
         KeyCode::Char('d') => {
             app.push_undo();
             if let Some(next) = app.map.delete_subtree(app.selected) {
                 app.selected = next;
                 app.dirty = true;
             } else {
-                app.message = Some("Cannot delete the root node".to_string());
+                app.set_message("Cannot delete the root node");
             }
         }
         KeyCode::Char('c') => {
@@ -246,6 +331,16 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
                 app.mode = Mode::Renaming {
                     buffer: node.title.clone(),
                 };
+            }
+        }
+        KeyCode::Char('k') => {
+            app.push_undo();
+            if let Some(node) = app.map.node_mut(app.selected) {
+                let new_color = node.color.cycle_next();
+                node.color = new_color;
+                app.dirty = true;
+                let label = new_color.label().to_string();
+                app.set_message(format!("Color set to {label}"));
             }
         }
         KeyCode::Enter => {
@@ -381,28 +476,47 @@ fn handle_prompt_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
                 app.mode = Mode::Normal;
             }
             KeyCode::Enter => {
-                let path = PathBuf::from(buffer.trim());
                 match kind {
-                    PromptKind::Open => match load_map(&path) {
-                        Ok(map) => {
-                            app.map = map;
-                            app.selected = app.map.root;
-                            app.file_path = Some(path);
-                            app.message = Some("Opened map".to_string());
-                            app.dirty = false;
-                            app.undo_stack.clear();
-                            app.redo_stack.clear();
+                    PromptKind::Open => {
+                        let path = PathBuf::from(buffer.trim());
+                        match load_map(&path) {
+                            Ok(map) => {
+                                app.map = map;
+                                app.selected = app.map.root;
+                                app.file_path = Some(path.clone());
+                                app.autosave_path = path;
+                                app.set_message("Opened map");
+                                app.dirty = false;
+                                app.undo_stack.clear();
+                                app.redo_stack.clear();
+                                app.last_autosave = None;
+                            }
+                            Err(err) => {
+                                app.set_message(format!("Failed to open: {err}"));
+                            }
                         }
-                        Err(err) => {
-                            app.message = Some(format!("Failed to open: {err}"));
-                        }
-                    },
+                    }
                     PromptKind::SaveAs => {
+                        let path = PathBuf::from(buffer.trim());
                         if path.as_os_str().is_empty() {
-                            app.message = Some("Path cannot be empty".to_string());
+                            app.set_message("Path cannot be empty");
                             return Ok(false);
                         }
-                        save_current_map(app, path)?;
+                        save_current_map(app, path.clone())?;
+                        app.autosave_path = path;
+                    }
+                    PromptKind::AutosavePath => {
+                        let path = PathBuf::from(buffer.trim());
+                        if path.as_os_str().is_empty() {
+                            app.set_message("Autosave path cannot be empty");
+                            return Ok(false);
+                        }
+                        app.set_autosave_path(path);
+                    }
+                    PromptKind::AutosaveInterval => {
+                        let text = buffer.trim();
+                        let secs: u64 = text.parse().unwrap_or(0);
+                        app.set_autosave_interval(secs);
                     }
                 }
                 app.mode = Mode::Normal;
@@ -504,10 +618,11 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
 
 fn save_current_map(app: &mut App, path: PathBuf) -> Result<()> {
     save_map(&path, &app.map)?;
-    app.file_path = Some(path);
+    app.file_path = Some(path.clone());
+    app.autosave_path = path;
     app.dirty = false;
-    app.message = Some("Map saved".to_string());
-    app.last_autosave = Instant::now();
+    app.set_message("Map saved");
+    app.last_autosave = Some(Instant::now());
     Ok(())
 }
 
@@ -516,8 +631,8 @@ fn draw(f: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Min(10),
-            Constraint::Length(6),
+            Constraint::Min(12),
+            Constraint::Length(3),
         ])
         .split(f.size());
 
@@ -528,8 +643,14 @@ fn draw(f: &mut Frame, app: &App) {
         .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
         .split(chunks[1]);
 
+    let side_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(body_chunks[1]);
+
     render_map(f, body_chunks[0], app);
-    render_details(f, body_chunks[1], app);
+    render_details(f, side_chunks[0], app);
+    render_shortcuts(f, side_chunks[1], app);
 
     render_footer(f, chunks[2], app);
 
@@ -539,6 +660,8 @@ fn draw(f: &mut Frame, app: &App) {
             let label = match kind {
                 PromptKind::Open => "Open map path",
                 PromptKind::SaveAs => "Save map as",
+                PromptKind::AutosavePath => "Autosave path",
+                PromptKind::AutosaveInterval => "Autosave interval (seconds, 0 disables)",
             };
             render_input_overlay(f, label, buffer);
         }
@@ -581,16 +704,33 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
     );
 
     let info = format!(
-        "selected: {} | mode: {} | nodes: {}",
+        "selected: {} | mode: {} | nodes: {} | undo: {} | redo: {}",
         app.map
             .node(app.selected)
             .map(|n| n.title.as_str())
             .unwrap_or(""),
         mode,
-        app.map.nodes.len()
+        app.map.nodes.len(),
+        app.undo_stack.len(),
+        app.redo_stack.len()
     );
 
-    let header = Paragraph::new(format!("{title_line}\n{info}"))
+    let autosave_info = if app.autosave_interval.is_zero() {
+        format!(
+            "autosave: off | path {} | last {}",
+            app.autosave_path.to_string_lossy(),
+            app.format_last_autosave()
+        )
+    } else {
+        format!(
+            "autosave: every {}s to {} | last {}",
+            app.autosave_interval.as_secs(),
+            app.autosave_path.to_string_lossy(),
+            app.format_last_autosave()
+        )
+    };
+
+    let header = Paragraph::new(format!("{title_line}\n{info}\n{autosave_info}"))
         .block(Block::default().borders(Borders::BOTTOM).title("Status"))
         .wrap(Wrap { trim: true });
     f.render_widget(header, area);
@@ -633,19 +773,23 @@ fn render_map(f: &mut Frame, area: Rect, app: &App) {
 
             for node in &app.map.nodes {
                 let is_selected = node.id == app.selected;
-                let color = if Some(node.id) == focused_hit {
-                    Color::Yellow
+                let base_color = node.color.to_color();
+                let mut style = Style::default().fg(base_color);
+                if Some(node.id) == focused_hit {
+                    style = style
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
                 } else if is_selected {
-                    Color::Cyan
+                    style = style
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                        .bg(Color::DarkGray);
                 } else if search_hits.contains(&node.id) {
-                    Color::LightYellow
-                } else {
-                    Color::White
-                };
+                    style = style.fg(Color::LightYellow);
+                }
                 ctx.print(
                     node.position.x,
                     node.position.y,
-                    Span::styled(node.title.clone(), Style::default().fg(color)),
+                    Span::styled(node.title.clone(), style),
                 );
             }
         });
@@ -655,12 +799,13 @@ fn render_map(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_details(f: &mut Frame, area: Rect, app: &App) {
     let node = app.map.node(app.selected);
-    let (title, note) = node
-        .map(|n| (n.title.clone(), n.note.clone()))
-        .unwrap_or_default();
+    let (title, note, color_label) = node
+        .map(|n| (n.title.clone(), n.note.clone(), n.color.label().to_string()))
+        .unwrap_or_else(|| ("".to_string(), "".to_string(), "default".to_string()));
     let content = format!(
-        "{}\n\n{}",
+        "{}\ncolor: {}\n\n{}",
         title,
+        color_label,
         if note.is_empty() {
             "No notes yet."
         } else {
@@ -676,21 +821,28 @@ fn render_details(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(paragraph, area);
 }
 
+fn render_shortcuts(f: &mut Frame, area: Rect, _app: &App) {
+    let lines = [
+        "q quit | o open | s save | S save as | n new",
+        "A autosave path | I autosave interval",
+        "a add | c clone | d delete | m move | t rename | k color",
+        "[ parent | ] child | arrows move/select | Tab/Shift-Tab cycle",
+        "Enter notes | / search | u undo | r redo | ? toggle help",
+    ];
+    let block = Block::default()
+        .title(Title::from("Shortcuts").alignment(Alignment::Center))
+        .borders(Borders::ALL);
+    let paragraph = Paragraph::new(lines.join("\n"))
+        .block(block)
+        .wrap(Wrap { trim: false });
+    f.render_widget(paragraph, area);
+}
+
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
-    let msg = app
-        .message
-        .clone()
-        .unwrap_or_else(|| {
-            "q quit - o open - s save - S save as - n new - a add - c clone - d delete - m move - t rename - Enter notes - / search - u undo - r redo - ? help"
-                .to_string()
-        });
-    let gauge = LineGauge::default()
-        .block(Block::default().borders(Borders::TOP).title("Shortcuts"))
-        .gauge_style(Style::default().fg(Color::LightMagenta))
-        .line_set(ratatui::symbols::line::THICK)
-        .label(msg)
-        .ratio(if app.dirty { 0.7 } else { 0.3 });
-    f.render_widget(gauge, area);
+    let msg = app.message_text();
+    let block = Block::default().borders(Borders::TOP).title("Messages");
+    let paragraph = Paragraph::new(msg).block(block).wrap(Wrap { trim: true });
+    f.render_widget(paragraph, area);
 }
 
 fn render_input_overlay(f: &mut Frame, label: &str, buffer: &str) {
@@ -734,14 +886,15 @@ fn render_note_overlay(f: &mut Frame, buffer: &str) {
 fn render_help(f: &mut Frame) {
     let area = centered_rect(70, 60, f.size());
     let lines = [
-        "Movement: arrow keys",
+        "Movement: arrows; parent [: child ]",
         "Select next/prev: Tab / Shift-Tab",
         "Add child: a | Clone: c | Delete: d",
         "Move node: m then arrows (hold Shift for bigger steps)",
-        "Rename: t | Notes: Enter (multi-line, Esc to close)",
+        "Rename: t | Notes: Enter (multi-line, Esc to close) | Color: k",
         "Search: / (type, Enter to jump, Up/Down cycle)",
         "Undo: u or Ctrl+Z | Redo: r or Ctrl+Y",
-        "Open: o | Save: s | Save As: S | New map: n (autosaves every 10s when dirty)",
+        "Autosave path: A | Autosave interval: I (seconds, 0 = off)",
+        "Open: o | Save: s | Save As: S | New map: n",
         "Toggle help: ? | Quit: q",
     ];
     let block = Block::default()
@@ -783,36 +936,94 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 impl App {
     fn new(map: MindMap, file_path: Option<PathBuf>) -> Self {
         let selected = map.root;
+        let autosave_path = file_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("ponder_autosave.json"));
         Self {
             map,
             selected,
             file_path,
+            autosave_path,
             mode: Mode::Normal,
             message: None,
             dirty: false,
             show_help: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            last_autosave: Instant::now(),
+            last_autosave: None,
             autosave_interval: Duration::from_secs(10),
             moving_snapshot: false,
         }
+    }
+
+    fn set_message(&mut self, text: impl Into<String>) {
+        self.set_message_with_timeout(text, Some(Duration::from_secs(4)));
+    }
+
+    fn set_message_with_timeout(&mut self, text: impl Into<String>, timeout: Option<Duration>) {
+        let expires_at = timeout.map(|d| Instant::now() + d);
+        self.message = Some(Toast {
+            text: text.into(),
+            expires_at,
+        });
+    }
+
+    fn prune_message(&mut self) {
+        if let Some(toast) = &self.message {
+            if let Some(expire) = toast.expires_at {
+                if Instant::now() >= expire {
+                    self.message = None;
+                }
+            }
+        }
+    }
+
+    fn message_text(&self) -> String {
+        self.message
+            .as_ref()
+            .map(|m| m.text.clone())
+            .unwrap_or_else(|| "Ready. Press ? for help.".to_string())
     }
 
     fn reset_to_new(&mut self) {
         self.map = MindMap::new("Mind Map");
         self.selected = self.map.root;
         self.file_path = None;
+        self.autosave_path = PathBuf::from("ponder_autosave.json");
         self.dirty = false;
-        self.message = Some("Started a new map".to_string());
+        self.set_message("Started a new map");
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.moving_snapshot = false;
+        self.last_autosave = None;
     }
 
     fn map_select_direction(&mut self, dir: NavDir) {
         if let Some(next) = self.map.nearest_in_direction(self.selected, dir) {
             self.selected = next;
+        }
+    }
+
+    fn jump_to_parent(&mut self) {
+        if let Some(parent) = self.map.node(self.selected).and_then(|n| n.parent) {
+            self.selected = parent;
+            self.set_message("Jumped to parent");
+        } else {
+            self.set_message("No parent");
+        }
+    }
+
+    fn jump_to_first_child(&mut self) {
+        if let Some(child) = self
+            .map
+            .node(self.selected)
+            .and_then(|n| n.children.first())
+            .copied()
+        {
+            self.selected = child;
+            self.set_message("Jumped to child");
+        } else {
+            self.set_message("No child");
         }
     }
 
@@ -842,9 +1053,9 @@ impl App {
             self.map = state.map;
             self.selected = state.selected;
             self.dirty = true;
-            self.message = Some("Undo".to_string());
+            self.set_message("Undo");
         } else {
-            self.message = Some("Nothing to undo".to_string());
+            self.set_message("Nothing to undo");
         }
     }
 
@@ -854,9 +1065,9 @@ impl App {
             self.map = state.map;
             self.selected = state.selected;
             self.dirty = true;
-            self.message = Some("Redo".to_string());
+            self.set_message("Redo");
         } else {
-            self.message = Some("Nothing to redo".to_string());
+            self.set_message("Nothing to redo");
         }
     }
 
@@ -864,16 +1075,48 @@ impl App {
         if !self.dirty {
             return;
         }
-        if self.last_autosave.elapsed() < self.autosave_interval {
+        if let Some(last) = self.last_autosave {
+            if last.elapsed() < self.autosave_interval {
+                return;
+            }
+        }
+        if self.autosave_interval.is_zero() {
             return;
         }
-        let path = self
-            .file_path
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("ponder_autosave.json"));
+        let path = self.autosave_path.clone();
         if save_map(&path, &self.map).is_ok() {
-            self.last_autosave = Instant::now();
-            self.message = Some(format!("Autosaved {}", path.to_string_lossy()));
+            self.last_autosave = Some(Instant::now());
+            self.set_message(format!("Autosaved {}", path.to_string_lossy()));
+        }
+    }
+
+    fn set_autosave_path(&mut self, path: PathBuf) {
+        self.autosave_path = path.clone();
+        self.set_message(format!("Autosave path set to {}", path.to_string_lossy()));
+    }
+
+    fn set_autosave_interval(&mut self, secs: u64) {
+        self.autosave_interval = Duration::from_secs(secs);
+        if secs == 0 {
+            self.set_message("Autosave disabled");
+        } else {
+            self.set_message(format!("Autosave every {}s", secs));
+        }
+    }
+
+    fn format_last_autosave(&self) -> String {
+        if self.autosave_interval.is_zero() {
+            return "disabled".to_string();
+        }
+        if let Some(last) = self.last_autosave {
+            let secs = last.elapsed().as_secs();
+            if secs == 0 {
+                "just now".to_string()
+            } else {
+                format!("{secs}s ago")
+            }
+        } else {
+            "never".to_string()
         }
     }
 
@@ -914,6 +1157,7 @@ impl MindMap {
                 id: root_id,
                 title: "Central Idea".to_string(),
                 note: String::new(),
+                color: NodeColor::Default,
                 position: Position { x: 0.0, y: 0.0 },
                 parent: None,
                 children: Vec::new(),
@@ -959,6 +1203,7 @@ impl MindMap {
             id,
             title,
             note: String::new(),
+            color: NodeColor::Default,
             position: Position {
                 x: parent_pos.x + offset.x,
                 y: parent_pos.y + offset.y,
