@@ -8,4 +8,3 @@
 
 /// Simple version string for external tools.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-

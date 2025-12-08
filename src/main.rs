@@ -84,6 +84,7 @@ enum Mode {
     },
     NoteEditor {
         buffer: String,
+        cursor: usize,
     },
     Search {
         query: String,
@@ -347,6 +348,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
             if let Some(node) = app.map.node(app.selected) {
                 app.mode = Mode::NoteEditor {
                     buffer: node.note.clone(),
+                    cursor: node.note.len(),
                 };
             }
         }
@@ -469,6 +471,124 @@ fn handle_renaming_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
     Ok(false)
 }
 
+fn insert_at_cursor(buffer: &mut String, cursor: &mut usize, ch: char) {
+    clamp_cursor(buffer, cursor);
+    buffer.insert(*cursor, ch);
+    *cursor += ch.len_utf8();
+}
+
+fn backspace(buffer: &mut String, cursor: &mut usize) {
+    clamp_cursor(buffer, cursor);
+    if let Some(prev) = prev_char_boundary(buffer, *cursor) {
+        buffer.drain(prev..*cursor);
+        *cursor = prev;
+    }
+}
+
+fn delete_at_cursor(buffer: &mut String, cursor: &mut usize) {
+    clamp_cursor(buffer, cursor);
+    if let Some(next) = next_char_boundary(buffer, *cursor) {
+        if next > *cursor {
+            buffer.drain(*cursor..next);
+        }
+    }
+}
+
+fn move_cursor_left(buffer: &str, cursor: &mut usize) {
+    clamp_cursor(buffer, cursor);
+    if let Some(prev) = prev_char_boundary(buffer, *cursor) {
+        *cursor = prev;
+    }
+}
+
+fn move_cursor_right(buffer: &str, cursor: &mut usize) {
+    clamp_cursor(buffer, cursor);
+    if let Some(next) = next_char_boundary(buffer, *cursor) {
+        *cursor = next;
+    }
+}
+
+fn move_cursor_line_start(buffer: &str, cursor: &mut usize) {
+    clamp_cursor(buffer, cursor);
+    *cursor = line_start(buffer, *cursor);
+}
+
+fn move_cursor_line_end(buffer: &str, cursor: &mut usize) {
+    clamp_cursor(buffer, cursor);
+    *cursor = line_end(buffer, *cursor);
+}
+
+fn move_cursor_up(buffer: &str, cursor: &mut usize) {
+    clamp_cursor(buffer, cursor);
+    let current_start = line_start(buffer, *cursor);
+    if current_start == 0 {
+        *cursor = 0;
+        return;
+    }
+    let current_col = *cursor - current_start;
+    let prev_end = current_start - 1;
+    let prev_start = buffer[..prev_end]
+        .rfind('\n')
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    let prev_len = prev_end.saturating_sub(prev_start);
+    *cursor = prev_start + current_col.min(prev_len);
+}
+
+fn move_cursor_down(buffer: &str, cursor: &mut usize) {
+    clamp_cursor(buffer, cursor);
+    let current_start = line_start(buffer, *cursor);
+    let current_col = *cursor - current_start;
+    let current_end = line_end(buffer, *cursor);
+    if current_end == buffer.len() {
+        *cursor = buffer.len();
+        return;
+    }
+    let next_start = current_end + 1;
+    let next_end = line_end(buffer, next_start);
+    let next_len = next_end.saturating_sub(next_start);
+    *cursor = next_start + current_col.min(next_len);
+}
+
+fn line_start(buffer: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(buffer.len());
+    buffer[..cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0)
+}
+
+fn line_end(buffer: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(buffer.len());
+    buffer[cursor..]
+        .find('\n')
+        .map(|idx| cursor + idx)
+        .unwrap_or(buffer.len())
+}
+
+fn prev_char_boundary(text: &str, cursor: usize) -> Option<usize> {
+    let cursor = cursor.min(text.len());
+    text[..cursor]
+        .char_indices()
+        .next_back()
+        .map(|(idx, _)| idx)
+}
+
+fn next_char_boundary(text: &str, cursor: usize) -> Option<usize> {
+    let cursor = cursor.min(text.len());
+    if cursor == text.len() {
+        return None;
+    }
+    text[cursor..]
+        .char_indices()
+        .nth(1)
+        .map(|(idx, _)| cursor + idx)
+        .or(Some(text.len()))
+}
+
+fn clamp_cursor(buffer: &str, cursor: &mut usize) {
+    if *cursor > buffer.len() {
+        *cursor = buffer.len();
+    }
+}
+
 fn handle_prompt_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
     if let Mode::Prompt { kind, buffer } = &mut app.mode {
         match key.code {
@@ -536,21 +656,30 @@ fn handle_prompt_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
 fn handle_note_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
     let mut commit_note: Option<String> = None;
     let mut exit_mode = false;
-    if let Mode::NoteEditor { buffer } = &mut app.mode {
+    if let Mode::NoteEditor { buffer, cursor } = &mut app.mode {
         match key.code {
             KeyCode::Esc => {
                 commit_note = Some(buffer.clone());
                 exit_mode = true;
             }
+            KeyCode::Left => move_cursor_left(buffer, cursor),
+            KeyCode::Right => move_cursor_right(buffer, cursor),
+            KeyCode::Up => move_cursor_up(buffer, cursor),
+            KeyCode::Down => move_cursor_down(buffer, cursor),
+            KeyCode::Home => move_cursor_line_start(buffer, cursor),
+            KeyCode::End => move_cursor_line_end(buffer, cursor),
             KeyCode::Backspace => {
-                buffer.pop();
+                backspace(buffer, cursor);
+            }
+            KeyCode::Delete => {
+                delete_at_cursor(buffer, cursor);
             }
             KeyCode::Enter => {
-                buffer.push('\n');
+                insert_at_cursor(buffer, cursor, '\n');
             }
             KeyCode::Char(c) => {
                 if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                    buffer.push(c);
+                    insert_at_cursor(buffer, cursor, c);
                 }
             }
             _ => {}
@@ -665,7 +794,7 @@ fn draw(f: &mut Frame, app: &App) {
             };
             render_input_overlay(f, label, buffer);
         }
-        Mode::NoteEditor { buffer } => render_note_overlay(f, buffer),
+        Mode::NoteEditor { buffer, cursor } => render_note_overlay(f, buffer, *cursor),
         Mode::Search {
             query,
             results,
@@ -871,7 +1000,7 @@ fn render_search_overlay(f: &mut Frame, query: &str, index: usize, count: usize)
     f.render_widget(paragraph, area);
 }
 
-fn render_note_overlay(f: &mut Frame, buffer: &str) {
+fn render_note_overlay(f: &mut Frame, buffer: &str, cursor: usize) {
     let area = centered_rect(90, 80, f.size());
     let block = Block::default()
         .title(Title::from("Notes (Esc to close)").alignment(Alignment::Center))
@@ -881,6 +1010,53 @@ fn render_note_overlay(f: &mut Frame, buffer: &str) {
         .wrap(Wrap { trim: false });
     f.render_widget(Clear, area);
     f.render_widget(paragraph, area);
+    if let Some((x, y)) = note_cursor_position(buffer, cursor, area) {
+        f.set_cursor(x, y);
+    }
+}
+
+fn note_cursor_position(buffer: &str, cursor: usize, area: Rect) -> Option<(u16, u16)> {
+    if area.width < 2 || area.height < 2 {
+        return None;
+    }
+    let content_width = area.width.saturating_sub(2).max(1) as usize;
+    let content_height = area.height.saturating_sub(2) as usize;
+    if content_height == 0 {
+        return None;
+    }
+
+    let cursor = cursor.min(buffer.len());
+    let mut x = 0usize;
+    let mut y = 0usize;
+    for ch in buffer[..cursor].chars() {
+        if ch == '\n' {
+            x = 0;
+            y += 1;
+        } else {
+            x += 1;
+            if x >= content_width {
+                x = 0;
+                y += 1;
+            }
+        }
+    }
+
+    if y >= content_height {
+        y = content_height - 1;
+        x = x.min(content_width.saturating_sub(1));
+    }
+
+    let x = area
+        .x
+        .saturating_add(1)
+        .saturating_add(x as u16)
+        .min(area.x.saturating_add(area.width.saturating_sub(1)));
+    let y = area
+        .y
+        .saturating_add(1)
+        .saturating_add(y as u16)
+        .min(area.y.saturating_add(area.height.saturating_sub(1)));
+    Some((x, y))
 }
 
 fn render_help(f: &mut Frame) {
